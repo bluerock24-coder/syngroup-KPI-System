@@ -1,0 +1,914 @@
+﻿import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
+  LineChart, Line, ComposedChart 
+} from 'recharts';
+import { 
+  Target, TrendingUp, Users, Settings, BookOpen, 
+  ChevronDown, ChevronRight, LayoutDashboard, List, 
+  FileText, Info, Calendar, Save,
+  Edit2, Trash2, Plus, Link as LinkIcon, Folder, FolderOpen, Layers, Box, X, Check, ArrowLeft,
+  FilePlus, Calculator, PieChart, Database, Cloud, AlertTriangle, LogIn, LogOut, Lock, Unlock, Bell, Settings2, UserCircle, ShieldAlert, Loader, RefreshCw, Sigma, Eye, Search, Building2, Paperclip, Activity
+} from 'lucide-react';
+
+// Firebase Imports
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDoc } from 'firebase/firestore';
+
+// --- Firebase Initialization ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Configuration ---
+const DEFAULT_TEAM_ID = "SYN2026"; 
+
+// --- Constants ---
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const PERSPECTIVES = [
+  { id: 'F', name: 'Financial', color: 'bg-blue-50 text-blue-700 border-blue-200', icon: TrendingUp, badgeColor: 'bg-blue-100 text-blue-800' },
+  { id: 'C', name: 'Customer', color: 'bg-green-50 text-green-700 border-green-200', icon: Users, badgeColor: 'bg-green-100 text-green-800' },
+  { id: 'P', name: 'Internal Process', color: 'bg-yellow-50 text-yellow-700 border-yellow-200', icon: Settings, badgeColor: 'bg-yellow-100 text-yellow-800' },
+  { id: 'L', name: 'Learning & Growth', color: 'bg-purple-50 text-purple-700 border-purple-200', icon: BookOpen, badgeColor: 'bg-purple-100 text-purple-800' },
+];
+
+// --- Initial Data ---
+const INITIAL_ORG_STRUCTURE = [
+  {
+    id: 'CORP', name: 'SynGroup Corporate', type: 'CORP', isOpen: true,
+    children: [
+      { id: 'G1', name: 'SynTech', type: 'GROUP', isOpen: true, children: [ { id: 'BU1', name: 'BU: Digital', type: 'BU', isOpen: true, children: [] } ] },
+      { id: 'G2', name: 'SynHub', type: 'GROUP', isOpen: true, children: [] },
+      { id: 'G3', name: 'Kusto', type: 'GROUP', isOpen: true, children: [] }
+    ]
+  }
+];
+const INITIAL_KPIS = [
+    {
+        id: '1', buId: 'CORP', perspective: 'F', code: 'F-01', name: 'Total Revenue Growth',
+        definition: 'Revenue growth YoY', unit: '%', weight: 40, baseline2025: 10, target2026: 15,
+        aggregationType: 'Sum', scoringCriteria: { 5: '> 15%' }, monthlyActuals: Array(12).fill(null), monthlyTargets: Array(12).fill(null), note: ''
+    }
+];
+const INITIAL_PERSPECTIVE_TARGETS = { F: 40, C: 20, P: 20, L: 20 };
+
+// --- Helper Functions ---
+const safeRender = (value, fallback = '-') => {
+    if (value === null || value === undefined || value === '') return fallback;
+    if (typeof value === 'object') return fallback;
+    if (typeof value === 'number') return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    return String(value);
+};
+
+const calculateYTD = (actuals, method) => {
+    if (!Array.isArray(actuals)) return 0;
+    const validData = actuals.filter(v => v !== null && v !== undefined && v !== '');
+    if (validData.length === 0) return 0;
+    const nums = validData.map(v => parseFloat(v));
+    if (method === 'Sum') return nums.reduce((a, b) => a + b, 0);
+    if (method === 'Average') return nums.reduce((a, b) => a + b, 0) / nums.length;
+    if (method === 'Last') return nums[nums.length - 1];
+    return 0;
+};
+
+const aggregateValues = (values, method) => {
+    if (!Array.isArray(values)) return 0;
+    const validValues = values.filter(v => v !== null && v !== undefined && v !== '').map(v => parseFloat(v));
+    if (validValues.length === 0) return 0;
+    if (method === 'Sum') return validValues.reduce((a, b) => a + b, 0);
+    if (method === 'Average') return validValues.reduce((a, b) => a + b, 0) / validValues.length;
+    if (method === 'Last') return validValues[validValues.length - 1];
+    return 0;
+};
+
+const calculateAggregatedValues = (parentKpi, allKpis) => {
+    if (!parentKpi.aggregationType || parentKpi.aggregationType === 'None') return { target: null, actual: null };
+    
+    const childKpis = allKpis.filter(k => k.alignment === parentKpi.code && k.id !== parentKpi.id);
+    
+    if (childKpis.length === 0) return { target: null, actual: null };
+
+    const targets = childKpis.map(k => parseFloat(k.target2026) || 0);
+    
+    const actuals = childKpis.map(k => {
+        const grandChildAgg = calculateAggregatedValues(k, allKpis);
+        if (grandChildAgg.actual !== null) return grandChildAgg.actual;
+        return calculateYTD(k.monthlyActuals, k.aggregationType);
+    });
+
+    let targetSum = 0;
+    let actualSum = 0;
+
+    if (parentKpi.aggregationType === 'Sum') {
+        targetSum = targets.reduce((a, b) => a + b, 0);
+        actualSum = actuals.reduce((a, b) => a + b, 0);
+    } else if (parentKpi.aggregationType === 'Average') {
+        targetSum = targets.reduce((a, b) => a + b, 0) / (targets.length || 1);
+        actualSum = actuals.reduce((a, b) => a + b, 0) / (actuals.length || 1);
+    }
+
+    return { target: targetSum, actual: actualSum };
+};
+
+const renderTextWithLinks = (text) => {
+    if (!text) return '-';
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    return text.split(urlRegex).map((part, i) => {
+        if (part.match(urlRegex)) {
+            return <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline font-medium" onClick={(e) => e.stopPropagation()}>{part}</a>;
+        }
+        return part;
+    });
+};
+
+const flattenOrgStructure = (nodes) => {
+    let result = [];
+    if (!Array.isArray(nodes)) return result;
+    nodes.forEach(node => {
+        if(node) {
+            result.push({ id: node.id, name: node.name, type: node.type });
+            if (node.children) {
+                result = result.concat(flattenOrgStructure(node.children));
+            }
+        }
+    });
+    return result;
+};
+
+const findNode = (nodes, id) => {
+    if (!Array.isArray(nodes)) return null;
+    for (const node of nodes) {
+        if (!node) continue;
+        if (node.id === id) return node;
+        if (node.children) {
+            const found = findNode(node.children, id);
+            if (found) return found;
+        }
+    }
+    return null;
+};
+
+const findUnitName = (nodes, id) => {
+    if (!Array.isArray(nodes)) return 'Unknown';
+    for (const node of nodes) {
+        if (node.id === id) return node.name;
+        if (node.children) {
+            const found = findUnitName(node.children, id);
+            if (found !== 'Unknown') return found;
+        }
+    }
+    return 'Unknown';
+};
+
+const findPath = (nodes, targetId, path = []) => {
+    if (!Array.isArray(nodes)) return null;
+    for (const node of nodes) {
+        if (!node) continue;
+        if (node.id === targetId) return [...path, node.id];
+        if (node.children) {
+            const result = findPath(node.children, targetId, [...path, node.id]);
+            if (result) return result;
+        }
+    }
+    return null;
+};
+
+const getSubtreeOnly = (nodes, rootId) => {
+    const root = findNode(nodes, rootId);
+    return root ? [root] : [];
+};
+
+const filterOrgTree = (nodes, userId, userPath) => {
+    if (!Array.isArray(nodes)) return [];
+    return nodes.reduce((acc, node) => {
+        if (!node) return acc;
+        const isAncestor = userPath.includes(node.id) && node.id !== userId;
+        const isUser = node.id === userId;
+        
+        if (isAncestor) {
+            const filteredChildren = filterOrgTree(node.children || [], userId, userPath);
+            if (filteredChildren.length > 0 || isUser) {
+                 acc.push({ ...node, children: filteredChildren });
+            }
+        } else if (isUser) {
+            acc.push(node); 
+        }
+        return acc;
+    }, []);
+};
+
+const isDescendantOrSelf = (nodes, ancestorId, targetId) => {
+    if (!ancestorId || !targetId) return false;
+    if (ancestorId === targetId) return true;
+    const ancestorNode = findNode(nodes, ancestorId);
+    if (!ancestorNode) return false;
+    const checkChildren = (n) => {
+        if (!n) return false;
+        if (n.id === targetId) return true;
+        if (n.children) {
+            for (let child of n.children) {
+                if (checkChildren(child)) return true;
+            }
+        }
+        return false;
+    };
+    return checkChildren(ancestorNode);
+};
+
+// --- COMPONENTS ---
+
+const Notification = ({ message, type, onClose }) => {
+    if (!message) return null;
+    return (
+        <div className={`fixed bottom-4 right-4 px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-fade-in z-[100] ${type === 'error' ? 'bg-red-600 text-white' : 'bg-green-600 text-white'}`}>
+            {type === 'error' ? <AlertTriangle size={20}/> : <Check size={20}/>}
+            <span className="font-medium text-sm">{typeof message === 'string' ? message : 'Notification'}</span>
+            <button onClick={onClose} className="ml-2 hover:bg-white/20 rounded-full p-1"><X size={14}/></button>
+        </div>
+    );
+};
+
+const LoginScreen = ({ onLogin, availableUnits, isDataLoaded, isUsingTemplate }) => {
+    const [selectedUnit, setSelectedUnit] = useState('');
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        onLogin(DEFAULT_TEAM_ID, null, true);
+    }, []);
+
+    const handleUnitSubmit = (e) => {
+        e.preventDefault();
+        if (!selectedUnit) { setError('Please select your department.'); return; }
+        const unitObj = availableUnits.find(u => u.id === selectedUnit);
+        if (unitObj) {
+            onLogin(DEFAULT_TEAM_ID, unitObj, false);
+        } else {
+            setError('Selected unit not found. Please refresh.');
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+                <div className="bg-blue-700 p-8 text-center">
+                    <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-4 backdrop-blur-md border border-white/30">
+                        <Target className="text-white" size={32} />
+                    </div>
+                    <h2 className="text-2xl font-bold text-white">SynGroup KPI</h2>
+                    <p className="text-blue-200 mt-2 text-sm">Enterprise Performance System</p>
+                </div>
+                <div className="p-8">
+                     <div className="flex justify-between items-center mb-6 px-2">
+                         <div className="text-left">
+                            <div className="text-xs text-slate-500 font-bold uppercase">Database</div>
+                            <div className="font-mono font-bold text-blue-600 text-lg">{DEFAULT_TEAM_ID}</div>
+                         </div>
+                         <div className="text-right">
+                             <div className="text-xs text-slate-500 font-bold uppercase">Status</div>
+                             <div className={`text-xs font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isUsingTemplate ? 'bg-orange-100 text-orange-600' : 'bg-green-100 text-green-600'}`}>
+                                 {isUsingTemplate ? <AlertTriangle size={10}/> : <Check size={10}/>}
+                                 {isUsingTemplate ? 'Using Template' : 'Connected'}
+                             </div>
+                         </div>
+                     </div>
+
+                    <form onSubmit={handleUnitSubmit} className="space-y-5 animate-in slide-in-from-bottom-5 fade-in duration-300">
+                        {!isDataLoaded ? (
+                            <div className="py-8 text-center text-slate-500">
+                                <Loader className="animate-spin mx-auto mb-2 text-blue-500" size={24}/>
+                                <span className="text-sm">Connecting to database...</span>
+                            </div>
+                        ) : availableUnits.length === 0 ? (
+                            <div className="p-4 bg-yellow-50 text-yellow-700 rounded-lg text-sm border border-yellow-200 text-center">
+                                <strong>Initializing System...</strong><br/>
+                                Please wait while we setup the structure.
+                            </div>
+                        ) : (
+                            <div className="relative">
+                                <UserCircle className="absolute left-3 top-3 text-slate-400" size={20}/>
+                                <select 
+                                    value={selectedUnit} 
+                                    onChange={(e) => setSelectedUnit(e.target.value)}
+                                    className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white appearance-none cursor-pointer hover:border-blue-400 transition-colors"
+                                >
+                                    <option value="">-- Select Your Department --</option>
+                                    {availableUnits.map(u => (
+                                        <option key={u.id} value={u.id}>
+                                            {u.type === 'CORP' ? '🏢 ' : u.type === 'GROUP' ? '📂 ' : '📦 '} {safeRender(u.name)}
+                                        </option>
+                                    ))}
+                                </select>
+                                <ChevronDown className="absolute right-3 top-3.5 text-slate-400 pointer-events-none" size={16}/>
+                            </div>
+                        )}
+                        {error && <div className="text-red-500 text-sm flex items-center justify-center gap-1 bg-red-50 p-2 rounded"><AlertTriangle size={14}/> {error}</div>}
+                        <button type="submit" disabled={!isDataLoaded || availableUnits.length === 0} className={`w-full text-white font-bold py-3 rounded-lg shadow-lg flex items-center justify-center gap-2 transition-all ${(!isDataLoaded || availableUnits.length === 0) ? 'bg-slate-300 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700 active:scale-95'}`}>
+                            <LogIn size={18} /> Enter Workspace
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const WeightSummary = ({ kpis, targets, onEditTargets, readOnly }) => {
+    const safeKpis = Array.isArray(kpis) ? kpis : [];
+    const safeTargets = targets || INITIAL_PERSPECTIVE_TARGETS;
+    const perspectiveActuals = PERSPECTIVES.reduce((acc, p) => {
+        acc[p.id] = safeKpis.filter(k => k.perspective === p.id).reduce((sum, k) => sum + (parseFloat(k.weight) || 0), 0);
+        return acc;
+    }, {});
+    const totalActual = Object.values(perspectiveActuals).reduce((a, b) => a + b, 0);
+
+    return (
+        <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 mb-6">
+            <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                    <PieChart size={18} /> BSC Weight Distribution
+                </h3>
+                <div className="flex gap-2 items-center">
+                    {!readOnly && (
+                        <button onClick={onEditTargets} className="text-xs font-medium text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded-full border border-blue-200 flex items-center gap-1 transition-colors">
+                            <Settings2 size={14}/> Set Targets
+                        </button>
+                    )}
+                    {readOnly && <span className="text-xs text-slate-400 flex items-center gap-1"><Lock size={12}/> Corp Targets</span>}
+                    <div className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-2 border ${totalActual === 100 ? 'bg-green-50 text-green-700 border-green-200' : 'bg-orange-50 text-orange-700 border-orange-200'}`}>
+                        Actual: {safeRender(totalActual)}% 
+                        {totalActual !== 100 && <AlertTriangle size={14}/>}
+                    </div>
+                </div>
+            </div>
+            <div className="grid grid-cols-4 gap-4">
+                {PERSPECTIVES.map(p => {
+                    const actual = perspectiveActuals[p.id] || 0;
+                    const target = safeTargets[p.id] || 0;
+                    const isMatch = Math.abs(actual - target) < 0.1;
+                    return (
+                        <div key={p.id} className={`p-3 rounded-lg border ${isMatch ? 'bg-slate-50 border-slate-200' : 'bg-yellow-50 border-yellow-200'}`}>
+                            <div className="flex items-center gap-2 mb-2">
+                                <div className={`p-1 rounded ${p.badgeColor}`}><p.icon size={12}/></div>
+                                <span className="text-xs font-bold text-slate-600 truncate">{p.name}</span>
+                            </div>
+                            <div className="flex justify-between items-end">
+                                <div><div className="text-xs text-slate-400">Actual</div><div className={`text-lg font-bold ${isMatch ? 'text-slate-800' : 'text-yellow-700'}`}>{safeRender(actual)}%</div></div>
+                                <div className="text-right"><div className="text-xs text-slate-400">Target</div><div className="text-sm font-medium text-slate-500">{safeRender(target)}%</div></div>
+                            </div>
+                             <div className="mt-2 h-1.5 w-full bg-gray-200 rounded-full overflow-hidden">
+                                <div className={`h-full rounded-full ${p.id === 'F' ? 'bg-blue-500' : p.id === 'C' ? 'bg-green-500' : p.id === 'P' ? 'bg-yellow-500' : 'bg-purple-500'}`} style={{width: `${Math.min((actual/target)*100, 100)}%`}}></div>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
+
+const OrgNode = ({ node, selectedId, onSelect, onToggle, onAction, level = 0, isEditMode }) => {
+    if (!node) return null;
+    const isSelected = node.id === selectedId;
+    const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+    const getIcon = () => {
+        if (node.type === 'CORP') return <Target size={16} className="text-blue-400" />;
+        if (node.type === 'GROUP') return <Layers size={16} className="text-purple-400" />;
+        return <Box size={16} className="text-orange-400" />;
+    };
+
+    return (
+        <div className="select-none">
+            <div className={`flex items-center justify-between px-3 py-1.5 my-0.5 rounded-md cursor-pointer transition-all group relative ${isSelected ? 'bg-blue-600 text-white shadow-md' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`} onClick={(e) => { e.stopPropagation(); onSelect(node.id); }}>
+                <div className="flex items-center gap-2 overflow-hidden flex-1">
+                    <button onClick={(e) => { e.stopPropagation(); onToggle(node.id); }} className={`p-0.5 rounded hover:bg-white/10 ${!hasChildren ? 'invisible' : ''}`}>
+                        {node.isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    </button>
+                    {getIcon()}
+                    <span className="text-sm font-medium truncate">{safeRender(node.name)}</span>
+                </div>
+                {isEditMode && (
+                     <div className="flex items-center bg-slate-700/50 rounded ml-2">
+                        <button onClick={(e) => { e.stopPropagation(); onAction('edit', node); }} className="p-1.5 hover:bg-blue-500 text-slate-300 hover:text-white rounded transition-colors" title="Rename"><Edit2 size={10} /></button>
+                        <button onClick={(e) => { e.stopPropagation(); onAction('add', node); }} className="p-1.5 hover:bg-green-500 text-slate-300 hover:text-white rounded transition-colors" title="Add Sub-unit"><Plus size={10} /></button>
+                        {node.type !== 'CORP' && <button onClick={(e) => { e.stopPropagation(); onAction('delete', node); }} className="p-1.5 hover:bg-red-500 text-slate-300 hover:text-white rounded transition-colors" title="Delete"><Trash2 size={10} /></button>}
+                    </div>
+                )}
+            </div>
+            {node.isOpen && hasChildren && <div className="pl-3">{node.children.map(child => <OrgNode key={child.id} node={child} selectedId={selectedId} onSelect={onSelect} onToggle={onToggle} onAction={onAction} level={level + 1} isEditMode={isEditMode} />)}</div>}
+        </div>
+    );
+};
+
+const PerspectiveCard = ({ perspective, kpis, allKpis, onDelete, onOpenModal, onReport, onShowBreakdown, readOnly }) => {
+  const Icon = perspective.icon;
+  const safeKpis = Array.isArray(kpis) ? kpis : [];
+  const totalPerspectiveWeight = safeKpis.reduce((acc, k) => acc + (parseFloat(k.weight) || 0), 0);
+  let totalWeightedScore = 0;
+
+  const kpisWithScore = safeKpis.map(kpi => {
+        const aggregated = calculateAggregatedValues(kpi, allKpis);
+        const ytd = aggregated.actual !== null ? aggregated.actual : calculateYTD(kpi.monthlyActuals, kpi.aggregationType);
+        const isAggregatedActual = aggregated.actual !== null;
+
+        const targetToUse = parseFloat(kpi.target2026); 
+        const percentAchieved = targetToUse ? (ytd / targetToUse) * 100 : 0;
+        
+        let score = 1;
+        if (targetToUse < kpi.baseline2025 && targetToUse > 0) { 
+            if (ytd <= targetToUse) score = 5; else if (ytd <= targetToUse * 1.1) score = 4; else if (ytd <= targetToUse * 1.2) score = 3; else score = 2;
+        } else {
+            if (percentAchieved >= 110) score = 5; else if (percentAchieved >= 100) score = 4; else if (percentAchieved >= 90) score = 3; else if (percentAchieved >= 80) score = 2; else score = 1;
+        }
+        const weightedScore = (score * (parseFloat(kpi.weight) || 0)) / 100;
+        totalWeightedScore += weightedScore;
+        
+        let status = 'In Process';
+        let statusColor = 'bg-blue-100 text-blue-700';
+        
+        if (targetToUse > 0) {
+             if (percentAchieved >= 100) {
+                 status = 'Completed';
+                 statusColor = 'bg-green-100 text-green-700';
+             } else if (percentAchieved < 80) { 
+                 status = 'Critical Delay';
+                 statusColor = 'bg-red-100 text-red-700';
+             } else if (percentAchieved < 90) {
+                 status = 'Delay';
+                 statusColor = 'bg-orange-100 text-orange-700';
+             }
+        } else {
+             status = '-';
+             statusColor = 'bg-slate-50 text-slate-400';
+        }
+
+        // Target Now Logic:
+        // 1. If Aggregated (has children aligned), use sum of children.
+        // 2. If Manual, use YTD Target derived from monthly plans.
+        // 3. If no children aligned and manual monthly targets empty, show '-'
+        let targetNowValue = null;
+        if (aggregated.target !== null) {
+            targetNowValue = aggregated.target;
+        } else {
+            // Calculate YTD Target for manual KPI
+            const currentMonthIdx = new Date().getMonth();
+            // If monthly targets are not filled, sum is 0.
+            const manualTargetSum = aggregateValues((kpi.monthlyTargets || []).slice(0, currentMonthIdx + 1), kpi.aggregationType || 'Sum');
+            // Show value if > 0, else null to indicate not set
+            targetNowValue = manualTargetSum > 0 ? manualTargetSum : null;
+        }
+
+        return { ...kpi, ytd, score, weightedScore, targetNow: targetNowValue, isAggregatedActual, status, statusColor };
+  });
+
+  return (
+    <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden mb-6">
+      <div className={`px-4 py-3 border-b flex items-center justify-between ${perspective.color} bg-opacity-20`}>
+        <div className="flex items-center gap-3">
+            <div className={`p-1.5 rounded-md ${perspective.badgeColor}`}><Icon size={18} /></div>
+            <div><h3 className="font-bold text-slate-800">{perspective.name}</h3><div className="text-xs text-slate-500">Weight: {safeRender(totalPerspectiveWeight)}%</div></div>
+        </div>
+        <div className="text-right"><div className="text-xs text-slate-500 font-medium uppercase">Score</div><div className="text-xl font-bold text-slate-800">{safeRender(totalWeightedScore)}</div></div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm text-left">
+          <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
+            <tr>
+              <th className="px-4 py-3 w-20">Code</th><th className="px-4 py-3">KPI Name</th><th className="px-4 py-3 text-center">Status</th><th className="px-4 py-3 text-center">Unit</th><th className="px-4 py-3 text-right">Target</th><th className="px-4 py-3 text-right bg-orange-50 text-orange-700">Target Now</th><th className="px-4 py-3 text-right bg-blue-50 text-blue-700">YTD Actual</th><th className="px-4 py-3 text-center bg-blue-50/50">W(%)</th><th className="px-4 py-3 text-center">Score</th><th className="px-4 py-3 text-right bg-green-50/50 font-bold">W.Score</th><th className="px-4 py-3 text-center w-32">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {kpisWithScore.map((kpi) => (
+                <tr key={kpi.id} className="hover:bg-slate-50 transition-colors group">
+                  <td className="px-4 py-3 font-medium text-slate-500">{safeRender(kpi.code)}</td>
+                  <td className="px-4 py-3 font-medium text-slate-800">
+                    <button onClick={() => onOpenModal(kpi, 'view')} className="text-left hover:text-blue-600 transition-colors group-hover/name block w-full">
+                        <div className="font-semibold decoration-blue-300 underline-offset-2 group-hover/name:underline truncate max-w-[180px]">{safeRender(kpi.name)}</div>
+                        <div className="text-xs text-slate-400 font-normal mt-0.5 truncate max-w-[180px]">{safeRender(kpi.definition)}</div>
+                    </button>
+                  </td>
+                  <td className="px-4 py-3 text-center">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border border-current opacity-80 ${kpi.statusColor}`}>
+                          {kpi.status}
+                      </span>
+                  </td>
+                  <td className="px-4 py-3 text-center text-slate-500">{safeRender(kpi.unit)}</td>
+                  <td className="px-4 py-3 text-right font-bold text-slate-600">{safeRender(kpi.target2026)}</td>
+                  <td className="px-4 py-3 text-right font-bold text-orange-600 bg-orange-50/30 flex items-center justify-end gap-1">
+                      {kpi.targetNow !== null ? safeRender(kpi.targetNow) : '-'}
+                      {kpi.isAggregatedActual && kpi.targetNow !== null && (
+                          <button onClick={() => onShowBreakdown(kpi)} className="p-1 rounded-full hover:bg-orange-100 text-orange-500" title="View Breakdown"><Eye size={12}/></button>
+                      )}
+                  </td>
+                  <td className="px-4 py-3 text-right font-bold text-blue-700 bg-blue-50/30 relative">
+                      {safeRender(kpi.ytd)}
+                      {kpi.isAggregatedActual && <div className="absolute top-1 right-1 text-[8px] text-blue-400 flex items-center"><Sigma size={8}/> Auto</div>}
+                  </td>
+                  <td className="px-4 py-3 text-center bg-blue-50/30 font-medium">{safeRender(kpi.weight)}</td>
+                  <td className="px-4 py-3 flex justify-center"><span className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold border ${kpi.score>=4?'bg-green-100 text-green-800 border-green-200':kpi.score===3?'bg-yellow-100 text-yellow-800 border-yellow-200':'bg-red-100 text-red-800 border-red-200'}`}>{safeRender(kpi.score)}</span></td>
+                  <td className="px-4 py-3 text-right bg-green-50/30 font-bold text-green-700">{kpi.weightedScore.toFixed(2)}</td>
+                  <td className="px-4 py-3 text-center">
+                    <div className="flex items-center justify-center gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
+                        {!readOnly ? (
+                            <>
+                                {!kpi.isAggregatedActual && <button onClick={() => onReport(kpi)} className="p-1.5 hover:bg-green-100 text-green-600 rounded shadow-sm border border-slate-200" title="Monthly Report"><FilePlus size={14} /></button>}
+                                {kpi.isAggregatedActual && <span className="p-1.5 text-slate-300 cursor-not-allowed"><FilePlus size={14}/></span>}
+                                <button onClick={() => onOpenModal(kpi, 'edit')} className="p-1.5 hover:bg-blue-100 text-blue-600 rounded shadow-sm border border-slate-200" title="Edit KPI"><Edit2 size={14} /></button>
+                                <button onClick={(e) => { e.stopPropagation(); onDelete(kpi.id); }} className="p-1.5 hover:bg-red-100 text-red-600 rounded shadow-sm border border-slate-200" title="Delete KPI"><Trash2 size={14} /></button>
+                            </>
+                        ) : (
+                            <span className="text-xs text-slate-400 flex items-center gap-1"><Lock size={12}/> Read Only</span>
+                        )}
+                    </div>
+                  </td>
+                </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+const KPIModal = ({ kpi, isOpen, onClose, onSave, mode, readOnly, allKpis = [] }) => {
+    const [formData, setFormData] = useState(kpi || {});
+    const [editMode, setEditMode] = useState(mode === 'edit' && !readOnly);
+    const [showAlignmentOptions, setShowAlignmentOptions] = useState(false);
+    const [localMonthlyTargets, setLocalMonthlyTargets] = useState(Array(12).fill(''));
+
+    useEffect(() => { setFormData(kpi || {}); setLocalMonthlyTargets(kpi?.monthlyTargets || Array(12).fill('')); setEditMode(mode === 'edit' && !readOnly); }, [kpi, mode, isOpen, readOnly]);
+    useEffect(() => { if (isOpen && kpi) { setFormData(prev => ({ ...prev, ...kpi })); } }, [kpi, isOpen]);
+
+    useEffect(() => { if (editMode && localMonthlyTargets.some(val => val !== '')) { const calculatedAnnual = aggregateValues(localMonthlyTargets, formData.aggregationType); setFormData(prev => ({ ...prev, target2026: calculatedAnnual })); } }, [localMonthlyTargets, formData.aggregationType, editMode]);
+
+    if (!isOpen || !kpi) return null;
+    const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
+    const handleScoreChange = (s, v) => setFormData({ ...formData, scoringCriteria: { ...(formData.scoringCriteria || {}), [s]: v } });
+    const handleMonthlyTargetChange = (index, value) => { const newTargets = [...localMonthlyTargets]; newTargets[index] = value; setLocalMonthlyTargets(newTargets); };
+    const handleSaveInternal = () => { onSave({ ...formData, monthlyTargets: localMonthlyTargets }); onClose(); };
+
+    return (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
+                <div className="bg-slate-50 p-4 border-b flex justify-between items-center"><h3 className="font-bold text-lg">{editMode ? 'Edit KPI' : 'KPI Details'}</h3><button onClick={onClose}><X size={20}/></button></div>
+                <div className="p-6 overflow-y-auto flex-1 space-y-4">
+                     <div className="grid grid-cols-2 gap-4">
+                        <div className="col-span-2"><label className="text-xs font-bold text-slate-500">Code</label>{editMode?<input name="code" value={formData.code||''} onChange={handleChange} className="w-full border rounded p-2"/>:<div className="font-mono font-bold">{safeRender(formData.code)}</div>}</div>
+                        <div className="col-span-2"><label className="text-xs font-bold text-slate-500">Name</label>{editMode?<input name="name" value={formData.name||''} onChange={handleChange} className="w-full border rounded p-2"/>:<div className="font-bold text-lg">{safeRender(formData.name)}</div>}</div>
+                        <div className="col-span-2"><label className="text-xs font-bold text-slate-500">Definition</label>{editMode?<textarea name="definition" value={formData.definition||''} onChange={handleChange} className="w-full border rounded p-2"/>:<div className="text-slate-700">{safeRender(formData.definition)}</div>}</div>
+                        
+                        <div className="col-span-2 relative">
+                            <label className="text-xs font-bold text-slate-500">Alignment (Parent KPI)</label>
+                            {editMode ? (
+                                <div className="relative"><input name="alignment" value={formData.alignment || ''} onChange={(e) => { handleChange(e); setShowAlignmentOptions(true); }} onFocus={() => setShowAlignmentOptions(true)} placeholder="Search parent..." className="w-full border rounded p-2" autoComplete="off"/>
+                                    {showAlignmentOptions && (<><div className="fixed inset-0 z-10" onClick={() => setShowAlignmentOptions(false)}></div><div className="absolute z-20 w-full bg-white border rounded shadow-lg max-h-60 overflow-y-auto mt-1 left-0"><div className="p-2 hover:bg-red-50 cursor-pointer text-red-500 text-sm font-bold border-b" onClick={() => { handleChange({ target: { name: 'alignment', value: '' } }); setShowAlignmentOptions(false); }}>Clear Alignment</div>{allKpis.filter(k => k.id !== formData.id && (k.code.toLowerCase().includes((formData.alignment||'').toLowerCase()) || k.name.toLowerCase().includes((formData.alignment||'').toLowerCase()))).map(k => (<div key={k.id} className="p-2 hover:bg-blue-50 cursor-pointer border-b border-slate-100" onClick={() => { handleChange({ target: { name: 'alignment', value: k.code } }); setShowAlignmentOptions(false); }}><span className="font-bold text-blue-600">{k.code}</span>: <span className="text-sm">{k.name}</span></div>))}</div></>)}
+                                </div>
+                            ) : (<div className="flex items-center gap-2"><span className="font-mono font-bold bg-slate-100 px-2 py-1 rounded text-slate-700">{safeRender(formData.alignment, 'None')}</span></div>)}
+                        </div>
+
+                        <div><label className="text-xs font-bold text-slate-500">Weight (%)</label>{editMode?<input type="number" name="weight" value={formData.weight||''} onChange={handleChange} className="w-full border rounded p-2"/>:<div>{safeRender(formData.weight)}%</div>}</div>
+                        <div><label className="text-xs font-bold text-slate-500">Annual Target</label>{editMode?<input type="number" name="target2026" value={formData.target2026||''} onChange={handleChange} className="w-full border rounded p-2 bg-slate-50" readOnly title="Calculated from monthly targets"/>:<div className="font-bold text-blue-600">{safeRender(formData.target2026)}</div>}</div>
+                        <div><label className="text-xs font-bold text-slate-500">Unit</label>{editMode?<input name="unit" value={formData.unit||''} onChange={handleChange} className="w-full border rounded p-2"/>:<div>{safeRender(formData.unit)}</div>}</div>
+                        <div><label className="text-xs font-bold text-slate-500">Method</label>{editMode?<select name="aggregationType" value={formData.aggregationType||'Sum'} onChange={handleChange} className="w-full border rounded p-2"><option value="None">None</option><option value="Sum">Sum</option><option value="Average">Average</option><option value="Last">Last</option></select>:<div>{safeRender(formData.aggregationType)}</div>}</div>
+                     </div>
+
+                     <div className="border rounded-lg overflow-hidden"><div className="bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600 flex justify-between items-center"><span>Monthly Targets</span></div><div className="grid grid-cols-6 gap-px bg-slate-200">{MONTH_NAMES.map((m, i) => (<div key={m} className="bg-white p-2"><div className="text-[10px] text-slate-400 mb-1">{m}</div>{editMode ? (<input type="number" value={localMonthlyTargets[i] || ''} onChange={(e) => handleMonthlyTargetChange(i, e.target.value)} className="w-full text-right text-sm border-b border-dashed border-slate-300 focus:border-blue-500 outline-none" placeholder="-"/>) : (<div className="text-right text-sm font-medium">{safeRender(localMonthlyTargets[i], '-')}</div>)}</div>))}</div></div>
+
+                     <div className="pt-4 border-t"><label className="text-xs font-bold text-slate-500 block mb-2">Scoring Criteria (1-5)</label>{[5,4,3,2,1].map(s => (<div key={s} className="flex gap-2 mb-2 items-center"><span className="w-6 h-6 rounded bg-slate-100 flex items-center justify-center text-xs font-bold">{s}</span>{editMode?<input value={formData.scoringCriteria?.[s]||''} onChange={(e)=>handleScoreChange(s,e.target.value)} className="flex-1 border rounded px-2 py-1 text-sm"/>:<span className="text-sm text-slate-600">{safeRender(formData.scoringCriteria?.[s], '-')}</span>}</div>))}</div>
+                     
+                     <div className="pt-4 border-t">
+                        <label className="text-xs font-bold text-slate-500 block mb-2 flex items-center gap-2"><Paperclip size={14}/> KPI Note & Links</label>
+                        {editMode ? <textarea name="note" value={formData.note || ''} onChange={handleChange} className="w-full border rounded p-2 min-h-[80px] text-sm" placeholder="Enter notes or links..."/> : <div className="text-sm text-slate-700 whitespace-pre-wrap p-3 bg-slate-50 rounded border border-slate-100 min-h-[60px]">{formData.note ? renderTextWithLinks(formData.note) : <span className="text-slate-400 italic">No notes.</span>}</div>}
+                     </div>
+                </div>
+                <div className="p-4 border-t bg-slate-50 flex justify-end gap-2">{editMode ? <><button onClick={()=>setEditMode(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-200 rounded">Cancel</button><button onClick={handleSaveInternal} className="px-4 py-2 bg-green-600 text-white rounded font-bold">Save</button></> : !readOnly && <button onClick={()=>setEditMode(true)} className="px-4 py-2 bg-blue-600 text-white rounded font-bold">Edit</button>}</div>
+            </div>
+        </div>
+    );
+};
+
+const TargetBreakdownModal = ({ isOpen, onClose, parentKpi, allKpis, orgStructure }) => {
+    if (!isOpen || !parentKpi) return null;
+    const childKpis = allKpis.filter(k => k.alignment === parentKpi.code && k.id !== parentKpi.id);
+    const aggregated = calculateAggregatedValues(parentKpi, allKpis);
+    const findUnitName = (nodes, id) => {
+        if (!Array.isArray(nodes)) return 'Unknown';
+        for (const node of nodes) {
+            if (node.id === id) return node.name;
+            if (node.children) {
+                const found = findUnitName(node.children, id);
+                if (found !== 'Unknown') return found;
+            }
+        }
+        return 'Unknown';
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+            <div className="bg-white rounded-xl w-full max-w-lg shadow-2xl overflow-hidden">
+                <div className="bg-orange-50 px-6 py-4 flex justify-between items-center border-b border-orange-100">
+                    <div className="flex items-center gap-2 text-orange-700"><Sigma size={20} /><h3 className="font-bold text-lg">Target Breakdown</h3></div>
+                    <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={20}/></button>
+                </div>
+                <div className="p-0">
+                    <div className="p-4 bg-slate-50 border-b border-slate-100">
+                         <div className="text-xs text-slate-500 font-bold uppercase mb-1">Parent KPI</div>
+                         <div className="font-bold text-slate-800 text-lg">{parentKpi.name} ({parentKpi.code})</div>
+                         <div className="text-sm text-slate-500 mt-1">Aggregation Method: <span className="font-bold text-blue-600">{parentKpi.aggregationType}</span></div>
+                    </div>
+                    <div className="max-h-60 overflow-y-auto">
+                        {childKpis.length === 0 ? (
+                            <div className="p-8 text-center text-slate-400 italic">No aligned KPIs found from sub-departments.</div>
+                        ) : (
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-slate-100 text-slate-500 font-semibold"><tr><th className="px-4 py-2">Department</th><th className="px-4 py-2">KPI Name</th><th className="px-4 py-2 text-right">Target</th></tr></thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {childKpis.map(child => (
+                                        <tr key={child.id}><td className="px-4 py-3 font-medium text-slate-700">{findUnitName(orgStructure, child.buId)}</td><td className="px-4 py-3 text-slate-600">{child.name}</td><td className="px-4 py-3 text-right font-bold text-slate-800">{safeRender(child.target2026)}</td></tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+                    </div>
+                    <div className="p-4 bg-orange-50 border-t border-orange-100 flex justify-between items-center"><span className="text-sm font-bold text-orange-800 uppercase">Total Target Now</span><span className="text-xl font-bold text-orange-700">{safeRender(aggregated.target)}</span></div>
+                </div>
+                <div className="p-3 bg-slate-50 border-t flex justify-end"><button onClick={onClose} className="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded font-bold hover:bg-slate-100 text-sm">Close</button></div>
+            </div>
+        </div>
+    );
+};
+
+const ReportingModal = ({ kpi, isOpen, onClose, onSave }) => {
+    const [selectedMonthIndex, setSelectedMonthIndex] = useState(new Date().getMonth());
+    const [monthlyValue, setMonthlyValue] = useState('');
+    const [previewYTD, setPreviewYTD] = useState(0);
+    const [previewTargetYTD, setPreviewTargetYTD] = useState(0);
+
+    useEffect(() => { if (kpi && isOpen) { const val = kpi.monthlyActuals && kpi.monthlyActuals[selectedMonthIndex]; setMonthlyValue(val !== null && val !== undefined ? val : ''); } }, [kpi, isOpen, selectedMonthIndex]);
+    
+    useEffect(() => { 
+        if (!kpi) return; 
+        const tempActuals = [...(kpi.monthlyActuals || [])]; tempActuals[selectedMonthIndex] = monthlyValue !== '' ? parseFloat(monthlyValue) : null; 
+        setPreviewYTD(calculateYTD(tempActuals, kpi.aggregationType));
+        
+        // Calculate Target YTD for comparison
+        const tempTargets = [...(kpi.monthlyTargets || [])];
+        const validTargets = tempTargets.slice(0, selectedMonthIndex + 1).map(v => parseFloat(v) || 0);
+        const targetSum = validTargets.reduce((a,b)=>a+b,0);
+        setPreviewTargetYTD(targetSum);
+    }, [monthlyValue, selectedMonthIndex, kpi]);
+
+    if (!isOpen || !kpi) return null;
+
+    const currentMonthTarget = kpi.monthlyTargets ? parseFloat(kpi.monthlyTargets[selectedMonthIndex]) : 0;
+
+    return (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm"><div className="bg-white rounded-xl w-full max-w-md shadow-2xl"><div className="bg-slate-900 p-4 flex justify-between items-center text-white"><div className="flex items-center gap-2 font-bold"><FilePlus size={18}/> Monthly Report</div><button onClick={onClose}><X size={18}/></button></div><div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-500 uppercase">Month</label><select value={selectedMonthIndex} onChange={(e)=>setSelectedMonthIndex(parseInt(e.target.value))} className="w-full border rounded p-2 mt-1">{MONTH_NAMES.map((m,i)=><option key={i} value={i}>{m}</option>)}</select></div><div><label className="text-xs font-bold text-slate-500 uppercase">Actual</label><input type="number" value={monthlyValue} onChange={(e)=>setMonthlyValue(e.target.value)} className="w-full border rounded p-2 mt-1 font-bold"/></div></div><div className="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded border border-slate-100"><div><div className="text-xs text-slate-400">Target ({MONTH_NAMES[selectedMonthIndex]})</div><div className="font-bold text-slate-800">{safeRender(currentMonthTarget)}</div></div><div className="text-right"><div className="text-xs text-slate-400">Target (YTD)</div><div className="font-bold text-slate-800">{safeRender(previewTargetYTD)}</div></div></div><div className="bg-blue-50 p-3 rounded flex justify-between font-bold text-blue-700"><span>Actual YTD Result</span><span>{previewYTD.toLocaleString()}</span></div><button onClick={() => { onSave(kpi, selectedMonthIndex, monthlyValue !== '' ? parseFloat(monthlyValue) : null); onClose(); }} className="w-full bg-blue-600 text-white py-2 rounded font-bold">Save</button></div></div></div>
+    );
+};
+
+const OrgNodeModal = ({ isOpen, onClose, node, mode, onSave }) => {
+    const [name, setName] = useState('');
+    useEffect(() => { if (isOpen) setName(node ? node.name : ''); }, [isOpen, node]);
+    const handleSubmit = (e) => { e.preventDefault(); if (name.trim()) { onSave(name.trim()); onClose(); } };
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 animate-fade-in"><div className="bg-white rounded-lg w-full max-w-sm p-6 shadow-xl"><h3 className="text-lg font-bold mb-4">{mode === 'add' ? 'Add New Unit' : 'Rename Unit'}</h3><form onSubmit={handleSubmit}><label className="block text-sm font-medium text-slate-700 mb-1">Unit Name</label><input autoFocus value={name} onChange={(e) => setName(e.target.value)} className="w-full border rounded-md px-3 py-2 mb-4 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="e.g., HR Department"/><div className="flex justify-end gap-2"><button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded">Cancel</button><button type="submit" className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 font-medium">{mode === 'add' ? 'Add' : 'Save'}</button></div></form></div></div>
+    );
+};
+
+const TargetWeightModal = ({ isOpen, onClose, targets, onSave }) => {
+    const [localTargets, setLocalTargets] = useState(targets || INITIAL_PERSPECTIVE_TARGETS);
+    useEffect(() => { if (isOpen && targets) setLocalTargets(targets); }, [isOpen, targets]);
+    if (!isOpen) return null;
+    const handleChange = (id, val) => setLocalTargets(prev => ({ ...prev, [id]: parseFloat(val) || 0 }));
+    const total = Object.values(localTargets).reduce((a, b) => a + b, 0);
+    return (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 animate-fade-in"><div className="bg-white rounded-xl w-full max-w-sm shadow-2xl overflow-hidden"><div className="bg-slate-900 px-6 py-4 flex justify-between items-center text-white"><h3 className="font-bold flex items-center gap-2"><PieChart size={18}/> Set Target Weights</h3><button onClick={onClose}><X size={18}/></button></div><div className="p-6 space-y-4">{PERSPECTIVES.map(p => (<div key={p.id} className="flex items-center gap-3"><div className={`p-1.5 rounded ${p.badgeColor}`}><p.icon size={16}/></div><label className="flex-1 text-sm font-medium text-slate-700">{p.name}</label><div className="flex items-center gap-1"><input type="number" value={localTargets[p.id] || 0} onChange={(e) => handleChange(p.id, e.target.value)} className="w-16 text-right border rounded px-2 py-1 text-sm font-bold"/><span className="text-slate-400 text-sm">%</span></div></div>))}<div className={`flex justify-between items-center pt-3 border-t ${total !== 100 ? 'text-red-600' : 'text-green-600'}`}><span className="text-sm font-bold">Total Target:</span><span className="font-bold text-lg">{total}%</span></div><button onClick={() => { onSave(localTargets); onClose(); }} className="w-full py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 mt-2">Save Targets</button></div></div></div>
+    );
+};
+
+// --- Main Application Component ---
+
+export default function SynGroupKPI() {
+  const [user, setUser] = useState(null);
+  const [teamId, setTeamId] = useState(localStorage.getItem('syn_kpi_team_id_v7') || ''); // Saved Team ID
+  const [currentUnit, setCurrentUnit] = useState(null);
+  
+  const [orgStructure, setOrgStructure] = useState([]);
+  const [kpis, setKpis] = useState([]);
+  const [perspectiveTargets, setPerspectiveTargets] = useState(INITIAL_PERSPECTIVE_TARGETS);
+  
+  const [selectedId, setSelectedId] = useState(null);
+  const [activeTab, setActiveTab] = useState('scorecard'); 
+  const [orgEditMode, setOrgEditMode] = useState(false); 
+  const [saving, setSaving] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
+  const [isUsingTemplate, setIsUsingTemplate] = useState(false);
+  
+  const [notification, setNotification] = useState(null);
+
+  // Modals
+  const [modalOpen, setModalOpen] = useState(false);
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [currentKpi, setCurrentKpi] = useState(null);
+  const [modalMode, setModalMode] = useState('view');
+  const [orgModalOpen, setOrgModalOpen] = useState(false);
+  const [orgModalMode, setOrgModalMode] = useState('add');
+  const [targetOrgNode, setTargetOrgNode] = useState(null);
+  const [targetWeightModalOpen, setTargetWeightModalOpen] = useState(false);
+  const [breakdownModalOpen, setBreakdownModalOpen] = useState(false);
+
+  // 1. Auth
+  useEffect(() => {
+    const initAuth = async () => {
+        try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
+            else await signInAnonymously(auth);
+        } catch (error) { console.warn("Auth failed", error); await signInAnonymously(auth); }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Data Sync
+  useEffect(() => {
+      if (!user || !teamId) return;
+      localStorage.setItem('syn_kpi_team_id_v7', teamId); // Save Team ID
+      const safeTeamId = teamId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const teamDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'teams', `org_${safeTeamId}`);
+      
+      const unsubscribe = onSnapshot(teamDocRef, (docSnap) => {
+          setIsLoading(false);
+          setIsDataLoaded(true);
+          if (docSnap.exists()) {
+              const data = docSnap.data();
+              setOrgStructure(Array.isArray(data.orgStructure) ? data.orgStructure : INITIAL_ORG_STRUCTURE);
+              setKpis(Array.isArray(data.kpis) ? data.kpis : INITIAL_KPIS);
+              setPerspectiveTargets(data.perspectiveTargets || INITIAL_PERSPECTIVE_TARGETS);
+              setIsUsingTemplate(false);
+          } else {
+              // Doc doesn't exist yet -> Show initial data but DO NOT WRITE AUTOMATICALLY
+              // This prevents overwriting if the user just typed the wrong ID
+              setOrgStructure(INITIAL_ORG_STRUCTURE);
+              setKpis(INITIAL_KPIS);
+              setPerspectiveTargets(INITIAL_PERSPECTIVE_TARGETS);
+              setIsUsingTemplate(true);
+          }
+      }, () => { setIsLoading(false); showNotification("Error syncing data", 'error'); });
+      return unsubscribe;
+  }, [user, teamId]); 
+
+  // LIVE SYNC: Update modal data if open
+  useEffect(() => {
+      if (currentKpi && kpis.length > 0) {
+          const updated = kpis.find(k => k.id === currentKpi.id);
+          if (updated && JSON.stringify(updated) !== JSON.stringify(currentKpi)) {
+              setCurrentKpi(updated);
+          }
+      }
+  }, [kpis]);
+
+  const showNotification = (msg, type='success') => { setNotification({ message: msg, type }); setTimeout(() => setNotification(null), 3000); };
+
+  const saveAllData = async (newOrg, newKpis, newTargets) => {
+      if (!user || !teamId) { showNotification("Offline", 'error'); return; }
+      setSaving(true);
+      try {
+          const safeTeamId = teamId.replace(/[^a-zA-Z0-9_-]/g, "_");
+          await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'teams', `org_${safeTeamId}`), {
+              orgStructure: newOrg !== undefined ? newOrg : orgStructure,
+              kpis: newKpis !== undefined ? newKpis : kpis,
+              perspectiveTargets: newTargets !== undefined ? newTargets : perspectiveTargets,
+              lastUpdated: new Date().toISOString()
+          });
+          // showNotification("Saved successfully!");
+      } catch (e) { console.error(e); showNotification("Save failed", 'error'); }
+      finally { setSaving(false); }
+  };
+
+  // Handlers
+  const handleLogin = (tid, unit, isTemp) => { 
+      setTeamId(tid);
+      if (unit) { setCurrentUnit(unit); setSelectedId(unit.id); } 
+  };
+  
+  const handleLogout = () => { 
+      localStorage.removeItem('syn_kpi_team_id_v7'); 
+      setTeamId(''); 
+      setCurrentUnit(null); 
+      setSelectedId(null); 
+  };
+  
+  const handleAddKpi = () => { setCurrentKpi({ id: Date.now().toString(), buId: selectedId, perspective: 'F', code: `NEW-${kpis.length + 1}`, name: 'New KPI', definition: '', unit: '', weight: 0, baseline2025: 0, target2026: 100, aggregationType: 'Sum', scoringCriteria: { 5: 'TBD' }, monthlyActuals: Array(12).fill(null), monthlyTargets: Array(12).fill(null), note: '' }); setModalMode('edit'); setModalOpen(true); };
+  const handleSaveKpi = (updatedKpi) => { const newKpis = kpis.some(k => k.id === updatedKpi.id) ? kpis.map(k => k.id === updatedKpi.id ? updatedKpi : k) : [...kpis, updatedKpi]; setKpis(newKpis); saveAllData(orgStructure, newKpis, perspectiveTargets); };
+  const handleDeleteKpi = (id) => { if(!window.confirm("Delete this KPI?")) return; const newKpis = kpis.filter(k => k.id !== id); setKpis(newKpis); saveAllData(orgStructure, newKpis, perspectiveTargets); };
+  const handleSaveReport = (kpi, monthIndex, value) => { const newActuals = [...(kpi.monthlyActuals || Array(12).fill(null))]; newActuals[monthIndex] = value; handleSaveKpi({ ...kpi, monthlyActuals: newActuals }); };
+  
+  // Delete Org Node Fix
+  const handleOrgAction = (action, node) => {
+      setTargetOrgNode(node);
+      if (action === 'add' || action === 'edit') { setOrgModalMode(action); setOrgModalOpen(true); }
+      else if (action === 'delete') {
+          if(node.type === 'CORP') { showNotification("Cannot delete Corp", 'error'); return; }
+          if(!window.confirm(`Delete ${node.name}?`)) return;
+          
+          const newOrg = JSON.parse(JSON.stringify(orgStructure));
+          const removeNode = (nodes) => {
+              for(let i=0; i<nodes.length; i++) {
+                  if(nodes[i].id === node.id) {
+                      nodes.splice(i, 1);
+                      return true;
+                  }
+                  if(nodes[i].children && removeNode(nodes[i].children)) return true;
+              }
+              return false;
+          };
+          
+          if(removeNode(newOrg)) {
+              setOrgStructure(newOrg);
+              saveAllData(newOrg, kpis, perspectiveTargets);
+              setSelectedId('CORP'); // Reset selection
+              showNotification("Deleted successfully");
+          }
+      }
+  };
+  
+  const handleSaveOrgNode = (name) => {
+      const newOrg = JSON.parse(JSON.stringify(orgStructure));
+      if (orgModalMode === 'add') {
+          const newId = `${targetOrgNode.id}-${Date.now().toString().slice(-4)}`;
+          const newType = targetOrgNode.type === 'CORP' ? 'GROUP' : (targetOrgNode.type === 'GROUP' ? 'BU' : 'SUB_BU');
+          const traverse = (nodes) => { for(let node of nodes) { if(node.id === targetOrgNode.id) { if(!node.children) node.children = []; node.children.push({ id: newId, name, type: newType, isOpen: true, children: [] }); node.isOpen = true; return true; } if(node.children && traverse(node.children)) return true; } };
+          traverse(newOrg); setSelectedId(newId);
+      } else {
+          const traverse = (nodes) => { for(let node of nodes) { if(node.id === targetOrgNode.id) { node.name = name; return true; } if(node.children && traverse(node.children)) return true; } };
+          traverse(newOrg);
+      }
+      setOrgStructure(newOrg); saveAllData(newOrg, kpis, perspectiveTargets);
+  };
+
+  // Permissions
+  const canEditKPI = currentUnit && (selectedId === currentUnit.id || isDescendantOrSelf(orgStructure, currentUnit.id, selectedId));
+  const canEditOrg = currentUnit && currentUnit.type === 'CORP'; 
+  const canEditTargets = currentUnit && currentUnit.type === 'CORP'; 
+
+  // Filter Visibility
+  const visibleOrgStructure = useMemo(() => {
+      if (!currentUnit) return [];
+      if (currentUnit.type === 'CORP') return orgStructure;
+      // Only show the subtree rooted at the logged-in unit
+      return getSubtreeOnly(orgStructure, currentUnit.id); 
+  }, [orgStructure, currentUnit]);
+
+  const findNodeName = (nodes, id) => { if(!Array.isArray(nodes)) return ''; for (const node of nodes) { if (!node) continue; if (node.id === id) return node.name; if (node.children) { const found = findNodeName(node.children, id); if (found) return found; } } return ''; };
+  const selectedName = useMemo(() => findNodeName(orgStructure, selectedId), [orgStructure, selectedId]);
+  const filteredKpis = useMemo(() => Array.isArray(kpis) ? kpis.filter(k => k.buId === selectedId) : [], [kpis, selectedId]);
+  const chartData = useMemo(() => MONTH_NAMES.slice(0, 6).map(m => ({ name: m, Achievement: 0, Target: 100 })), []);
+
+  const handleOpenReport = (kpi) => { setCurrentKpi(kpi); setReportModalOpen(true); };
+  const handleOpenModal = (kpi, mode) => { setCurrentKpi(kpi); setModalMode(mode); setModalOpen(true); };
+  const handleShowBreakdown = (kpi) => { setCurrentKpi(kpi); setBreakdownModalOpen(true); };
+
+  if (!teamId || (teamId && !currentUnit && !user)) return <LoginScreen onLogin={handleLogin} availableUnits={flattenOrgStructure(orgStructure)} savedTeamId={teamId} isDataLoaded={isDataLoaded} />;
+  if (teamId && !currentUnit) return <LoginScreen onLogin={handleLogin} availableUnits={flattenOrgStructure(orgStructure)} savedTeamId={teamId} isDataLoaded={isDataLoaded} />;
+
+  return (
+    <div className="flex h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
+      {isLoading && <div className="fixed inset-0 bg-white/80 z-[60] flex items-center justify-center flex-col gap-3"><Loader className="animate-spin text-blue-600" size={40}/><span className="font-bold text-slate-600">Loading Data...</span></div>}
+      <aside className="w-72 bg-slate-900 text-white flex flex-col shadow-xl z-10">
+        <div className="p-6 border-b border-slate-800"><div className="flex items-center gap-2 text-blue-400 mb-1"><Target size={20} /><span className="font-bold tracking-wide">SYN-GROUP</span></div><h1 className="text-lg font-semibold text-white">KPI System 2026</h1></div>
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-2">
+          <div className="mb-2 px-2 text-xs font-bold text-slate-500 uppercase flex justify-between items-center">
+            <span>Organization Chart</span>
+            {canEditOrg && <button onClick={() => setOrgEditMode(!orgEditMode)} className={`p-1.5 rounded-md transition-all flex items-center gap-1 ${orgEditMode ? 'text-yellow-400 bg-yellow-400/10 border border-yellow-400/20' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}>{orgEditMode ? <Unlock size={14} /> : <Lock size={14} />}</button>}
+          </div>
+          {visibleOrgStructure.map(node => <OrgNode key={node.id} node={node} selectedId={selectedId} onSelect={setSelectedId} onToggle={(id)=>{const newOrg=JSON.parse(JSON.stringify(orgStructure));const t=(nodes)=>{for(let n of nodes){if(n.id===id){n.isOpen=!n.isOpen;return true}if(n.children)t(n.children)}};t(newOrg);setOrgStructure(newOrg)}} onAction={handleOrgAction} isEditMode={orgEditMode && canEditOrg} />)}
+        </div>
+        <div className="p-4 border-t border-slate-800 bg-slate-900/50"><div className="flex items-center justify-between"><div className="flex items-center gap-3"><div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-xs font-bold"><UserCircle size={16}/></div><div className="overflow-hidden"><div className="text-sm font-medium text-white truncate">{safeRender(currentUnit.name)}</div><div className="text-xs text-green-400 flex items-center gap-1"><Cloud size={10}/> {saving ? 'Saving...' : 'Online'}</div></div></div><button onClick={handleLogout} className="text-slate-500 hover:text-red-400 transition-colors"><LogOut size={18}/></button></div></div>
+      </aside>
+      <main className="flex-1 flex flex-col h-full overflow-hidden">
+        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shadow-sm shrink-0">
+          <div><h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">{safeRender(selectedName) || 'Select Unit'}</h2><div className="text-xs text-slate-500 mt-0.5 flex items-center gap-2">{canEditKPI ? <span className="text-green-600 bg-green-50 px-2 py-0.5 rounded border border-green-100 font-bold">Edit Access</span> : <span className="text-slate-400 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1"><ShieldAlert size={10}/> Read Only</span>}</div></div>
+          <div className="flex bg-slate-100 rounded-lg p-1 gap-1"><button onClick={() => setActiveTab('dashboard')} className={`px-4 py-1.5 text-sm font-medium rounded-md flex gap-2 ${activeTab === 'dashboard' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}><LayoutDashboard size={16}/> Dashboard</button><button onClick={() => setActiveTab('scorecard')} className={`px-4 py-1.5 text-sm font-medium rounded-md flex gap-2 ${activeTab === 'scorecard' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}><List size={16}/> Scorecard</button></div>
+        </header>
+        <div className="flex-1 overflow-y-auto p-8">
+            {activeTab === 'dashboard' && <div className="max-w-6xl mx-auto space-y-6"><div className="grid grid-cols-4 gap-6"><div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200"><div className="text-slate-500 text-sm font-medium mb-1">Total KPIs</div><div className="text-3xl font-bold text-slate-800">{filteredKpis.length}</div></div><div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 col-span-3 flex items-center justify-center text-slate-400 text-sm border-dashed"><ResponsiveContainer width="100%" height={200}><ComposedChart data={MONTH_NAMES.slice(0, 6).map(m => ({ name: m, Achievement: 0, Target: 100 }))}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" axisLine={false} /><YAxis axisLine={false} /><Tooltip /><Bar dataKey="Achievement" barSize={40} fill="#3b82f6" /></ComposedChart></ResponsiveContainer></div></div></div>}
+            {activeTab === 'scorecard' && <div className="max-w-7xl mx-auto"><div className="mb-6 flex justify-between items-end"><div><h3 className="text-lg font-bold text-slate-800">Scorecard Management</h3><p className="text-slate-500 text-sm">Manage KPIs for {safeRender(selectedName)}</p></div>{canEditKPI && <button onClick={handleAddKpi} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 shadow-sm"><Plus size={16} /> Add KPI</button>}</div><WeightSummary kpis={filteredKpis} targets={perspectiveTargets} onEditTargets={() => setTargetWeightModalOpen(true)} readOnly={!canEditTargets}/>{PERSPECTIVES.map(p => { const groupKpis = filteredKpis.filter(k => k.perspective === p.id); return <PerspectiveCard key={p.id} perspective={p} kpis={groupKpis} allKpis={kpis} onDelete={handleDeleteKpi} onOpenModal={(k)=>{setCurrentKpi(k);setModalMode('view');setModalOpen(true);}} onOpenReport={handleOpenReport} onReport={handleOpenReport} onOpenModalEdit={(k)=>{setCurrentKpi(k);setModalMode('edit');setModalOpen(true);}} onShowBreakdown={handleShowBreakdown} readOnly={!canEditKPI} />;})}</div>}
+        </div>
+        <KPIModal isOpen={modalOpen} onClose={() => setModalOpen(false)} kpi={currentKpi} onSave={handleSaveKpi} mode={modalMode} readOnly={!canEditKPI} allKpis={kpis} />
+        <ReportingModal isOpen={reportModalOpen} onClose={() => setReportModalOpen(false)} kpi={currentKpi} onSave={handleSaveReport} />
+        <OrgNodeModal isOpen={orgModalOpen} onClose={() => setOrgModalOpen(false)} node={targetOrgNode} mode={orgModalMode} onSave={handleSaveOrgNode} />
+        <TargetWeightModal isOpen={targetWeightModalOpen} onClose={() => setTargetWeightModalOpen(false)} targets={perspectiveTargets} onSave={(t)=>{setPerspectiveTargets(t);saveAllData(orgStructure,kpis,t);}} />
+        <TargetBreakdownModal isOpen={breakdownModalOpen} onClose={() => setBreakdownModalOpen(false)} parentKpi={currentKpi} allKpis={kpis} orgStructure={orgStructure} />
+
+        {saving && <div className="fixed top-4 right-4 bg-blue-600 text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-2 text-sm font-bold z-50 animate-pulse"><Loader size={16} className="animate-spin"/> Saving...</div>}
+        <Notification message={notification?.message} type={notification?.type} onClose={() => setNotification(null)} />
+      </main>
+    </div>
+  );
+}
